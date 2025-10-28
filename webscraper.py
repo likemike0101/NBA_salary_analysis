@@ -43,7 +43,10 @@ tables = pd.read_html(temp_url)
 
 df = tables[0]
 
+df = df.drop(df.columns[0],axis=1)
 
-df.columns = ['index', 'player', '2024-2025']
+
+
+df.columns = ['player', '2024-2025']
 
 print(df)

@@ -1,4 +1,6 @@
 import pandas as pd
+import re
+import requests
 
 
 HEADERS = {
@@ -38,15 +40,96 @@ NBA_TEAM_URL = {
     "Utah Jazz": "https://www.hoopshype.com/salaries/teams/utah-jazz/26/?season=",
     "Washington Wizards": "https://www.hoopshype.com/salaries/teams/washington-wizards/27/?season="
 }
-temp_url = NBA_TEAM_URL['Atlanta Hawks'] + "2024"
-tables = pd.read_html(temp_url)
 
-df = tables[0]
+def fetch_team_table(url: str) -> pd.DataFrame:
+    """Fetch the salaries table HTML with headers, then parse via pandas."""
+    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+    tables = pd.read_html(resp.text)
+    if not tables:
+        raise ValueError("No tables found on page")
+    df = tables[0].copy()
 
-df = df.drop(df.columns[0],axis=1)
+    # Drop first column if it's the rank column (often unnamed or 'Rk')
+    if df.columns[0] in ('Unnamed: 0', df.columns[0]) and df.shape[1] >= 2:
+        df = df.drop(columns=[df.columns[0]])
+    # Keep only first 2 columns (name + current season)
+    df = df.iloc[:, :2]
+    df.columns = ['player', 'salary_raw']
+
+    # Drop the 'Total' row and any NaNs
+    df = df[df['player'].astype(str).str.lower() != 'total'].dropna(subset=['player'])
+
+    return df.reset_index(drop=True)
+
+_money_pat = re.compile(r'[\d,]+(?:\.\d+)?')  # picks up numbers inside "$xx,xxx" or "TW$xxx"
+def parse_salary_to_float(s: str) -> float:
+    """Extract numeric dollars from strings like '$43,031,940' or 'TW$578,577' or '$186,594'."""
+    if pd.isna(s):
+        return float('nan')
+    s = str(s)
+    m = _money_pat.search(s.replace('\xa0', ' '))
+    if not m:
+        return float('nan')
+    return float(m.group(0).replace(',', ''))
 
 
+def scrape_team(team: str, base_url: str, season: int) -> pd.DataFrame:
+    df = fetch_team_table(f"{base_url}{season}")
+    df['salary'] = df['salary_raw'].map(parse_salary_to_float)
+    # Sort highest paid first; keep only rows with a valid salary number
+    df = df.dropna(subset=['salary']).sort_values('salary', ascending=False).reset_index(drop=True)
+    df['rank'] = df.index + 1
+    df['team'] = team
+    df['season'] = season
+    return df[['team', 'season', 'rank', 'player', 'salary']]
 
-df.columns = ['player', '2024-2025']
+def build_team_season_wide(nba_urls: dict, season: int, top_n: int = 15) -> pd.DataFrame:
+    # Collect long-form rows
+    long_rows = []
+    for team, url in nba_urls.items():
+        try:
+            team_df = scrape_team(team, url, season)
+        except Exception as e:
+            print(f"[WARN] {team}: {e}")
+            continue
+        # Limit to top N
+        long_rows.append(team_df.head(top_n))
 
-print(df)
+    if not long_rows:
+        raise RuntimeError("No team tables were parsed successfully.")
+
+    long_df = pd.concat(long_rows, ignore_index=True)
+
+    # one row per team-season.
+    name_wide = long_df.pivot(index=['team', 'season'], columns='rank', values='player')
+    sal_wide  = long_df.pivot(index=['team', 'season'], columns='rank', values='salary')
+
+    # Rename columns
+    name_wide.columns = [f"P{r}_name" for r in name_wide.columns]
+    sal_wide.columns  = [f"P{r}_salary" for r in sal_wide.columns]
+
+    wide = pd.concat([name_wide, sal_wide], axis=1).reset_index()
+
+    # sort columns 
+    # e.g., P1_name, P1_salary, P2_name, P2_salary, …
+    def _sort_key(col):
+        if col in ('team', 'season'):
+            return (-1, col)
+        m = re.match(r'P(\d+)_(name|salary)$', col)
+        if not m:
+            return (9999, col)
+        return (int(m.group(1)), 0 if m.group(2) == 'name' else 1)
+
+    wide = wide.reindex(sorted(wide.columns, key=_sort_key), axis=1)
+    return wide
+TOP_N = 15      # change this if you want more/fewer columns
+
+for i in range(2020, 2025):
+    season = i
+    team_season_wide = build_team_season_wide(NBA_TEAM_URL, season=season, top_n=TOP_N)
+
+
+    pd.set_option('display.max_columns', None)
+    print(team_season_wide.head(3))
+    team_season_wide.to_csv(f"nba_salaries_top{TOP_N}_{season}.csv", index=False)

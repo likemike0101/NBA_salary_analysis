@@ -62,7 +62,7 @@ def fetch_team_table(url: str) -> pd.DataFrame:
 
     return df.reset_index(drop=True)
 
-_money_pat = re.compile(r'[\d,]+(?:\.\d+)?')  # picks up numbers inside "$xx,xxx" or "TW$xxx"
+_money_pat = re.compile(r'[\d,]+(?:\.\d+)?')  # picks up numbers inside "$xx,xxx" or "TW$xxx
 def parse_salary_to_float(s: str) -> float:
     """Extract numeric dollars from strings like '$43,031,940' or 'TW$578,577' or '$186,594'."""
     if pd.isna(s):
